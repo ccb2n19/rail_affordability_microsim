@@ -1,0 +1,601 @@
+---
+title: "Process aggegate data"
+output: html_notebook
+---
+
+```{r setup}
+library(tidyverse)
+library(ggplot2)
+library(sf)
+library(pander)
+library(purrrlyr)
+
+knitr::opts_knit$set(root.dir = "J:/mydocuments/dissertation")
+```
+
+This script will process aggregate census tables to create a data that can be used as constraints during the IPF process. 
+
+General steps for each set of constraint variables are:
+
+- Rename columns
+- Sum up categories, if required
+- Filter, to obtain just MSOAs within the case study area
+- Rebase population counts to a column total, if required
+
+### Smart round
+This function will be used while rebasing survey populations to reobtain integer counts which sum to the MSOA total (taken from: https://stackoverflow.com/questions/32544646/round-vector-of-numerics-to-integer-while-preserving-their-sum):
+
+```{r}
+#set up smart round function
+
+smart.round <- function(x) {
+  y <- floor(x)
+  indices <- tail(order(x-y), round(sum(x)) - sum(y))
+  y[indices] <- y[indices] + 1
+  y
+}
+```
+
+### List of desired MSOAs
+This list was obtained while generating the geodatabase:
+
+```{r}
+msoa_vec <- st_read(dsn = "processed_spatial_files/case_study_msoa_boundaries.shp") %>%
+  select(msoa11cd) %>%
+  st_drop_geometry() %>%
+  as_vector() %>%
+  unname()
+```
+
+### Sex by age (filtered by economic activity)
+Table: https://www.nomisweb.co.uk/census/2011/dc6107ew
+
+Note: this constraint will be used as the target total when rebasing to a common population total.
+
+```{r}
+age_sex_economic_activity_orig <- read_csv("census/nomis/final_aggregate_sets/sex_age_economic_activity.csv")
+
+colnames(age_sex_economic_activity_orig)
+
+age_sex_economic_activity_orig %>% select("geography code", "Sex: All persons; Age: All categories: Age 16 and over; Economic Activity: Economically active: In employment: Total; measures: Value") %>%
+  head(100) %>%
+  pander()
+
+age_sex_constraint_w_econ_act <- age_sex_economic_activity_orig %>%
+  select(!1:2) %>%
+  select(!contains("Economic Activity: All categories")) %>%
+  select(!contains("Sex: All persons")) %>%
+  select(!contains("Age: All categories")) %>%
+  select("geography code", contains("In employment: Total")) %>%
+  select(
+    msoa11cd = "geography code",
+    m_16_24 = "Sex: Males; Age: Age 16 to 24; Economic Activity: Economically active: In employment: Total; measures: Value",
+    m_25_34 = "Sex: Males; Age: Age 25 to 34; Economic Activity: Economically active: In employment: Total; measures: Value",
+    m_35_49 = "Sex: Males; Age: Age 35 to 49; Economic Activity: Economically active: In employment: Total; measures: Value",
+    m_50_64 = "Sex: Males; Age: Age 50 to 64; Economic Activity: Economically active: In employment: Total; measures: Value",
+    m_65_plus = "Sex: Males; Age: Age 65 and over; Economic Activity: Economically active: In employment: Total; measures: Value",
+    f_16_24 = "Sex: Females; Age: Age 16 to 24; Economic Activity: Economically active: In employment: Total; measures: Value",
+    f_25_34 = "Sex: Females; Age: Age 25 to 34; Economic Activity: Economically active: In employment: Total; measures: Value",
+    f_35_49 = "Sex: Females; Age: Age 35 to 49; Economic Activity: Economically active: In employment: Total; measures: Value",
+    f_50_64 = "Sex: Females; Age: Age 50 to 64; Economic Activity: Economically active: In employment: Total; measures: Value",
+    f_65_plus = "Sex: Females; Age: Age 65 and over; Economic Activity: Economically active: In employment: Total; measures: Value") %>%
+  filter(msoa11cd %in% msoa_vec)
+
+age_sex_constraint_w_econ_act
+```
+
+Create target MSOA population object:
+
+```{r}
+target_msoa_pop <- age_sex_constraint_w_econ_act %>%
+  mutate(target_pop = rowSums(age_sex_constraint_w_econ_act[2:11])) %>%
+  select(msoa11cd, target_pop) %>%
+  arrange(by = msoa11cd)
+```
+
+### NS-Sec (filtered by economic activity)
+Table: https://www.nomisweb.co.uk/census/2011/dc6606ew
+
+```{r}
+ns_sec_economic_activity_orig <- read_csv("census/nomis/final_aggregate_sets/ns_sec_by_economic_activity.csv")
+
+ns_sec_constraint <- ns_sec_economic_activity_orig %>%
+  select("geography code", contains("Economically active: In employment: Total")) %>%
+  select(msoa11cd = "geography code",
+      one = "NS-SeC: 1. Higher managerial, administrative and professional occupations; Economic Activity: Economically active: In employment: Total; measures: Value",
+      two = "NS-SeC: 2. Lower managerial, administrative and professional occupations; Economic Activity: Economically active: In employment: Total; measures: Value",
+      three = "NS-SeC: 3. Intermediate occupations; Economic Activity: Economically active: In employment: Total; measures: Value",
+      four = "NS-SeC: 4. Small employers and own account workers; Economic Activity: Economically active: In employment: Total; measures: Value",
+      five = "NS-SeC: 5. Lower supervisory and technical occupations; Economic Activity: Economically active: In employment: Total; measures: Value",
+      six = "NS-SeC: 6. Semi-routine occupations; Economic Activity: Economically active: In employment: Total; measures: Value",
+      seven = "NS-SeC: 7. Routine occupations; Economic Activity: Economically active: In employment: Total; measures: Value",
+      students = "NS-SeC: L15 Full-time students; Economic Activity: Economically active: In employment: Total; measures: Value",
+      original_census_in_employment_total = "NS-SeC: All categories: NS-SeC; Economic Activity: Economically active: In employment: Total; measures: Value"
+      ) %>%
+  filter(msoa11cd %in% msoa_vec)
+
+ns_sec_constraint <- ns_sec_constraint %>%
+    mutate(total_without_students = rowSums(.[2:8]),
+                              one = ((one / total_without_students) * students) + one,
+                              two = ((two / total_without_students) * students) + two,
+                            three = ((three / total_without_students) * students) + three,
+                             four = ((four / total_without_students) * students) + four,
+                             five = ((five / total_without_students) * students) + five,
+                              six = ((six / total_without_students) * students) + six,
+                            seven = ((seven / total_without_students) * students) + seven) %>%
+  select(-students) %>%
+  mutate(new_total = rowSums(.[2:8]))
+
+category_names <- ns_sec_constraint[2:8] %>% 
+                  colnames()
+
+#apply rounding
+ns_sec_constraint <- ns_sec_constraint %>%
+  by_row(.collate = "cols", ..f = function(this_row) {                              ### group by row
+  data.frame(
+    rounded_vars = this_row[2:8] %>% unlist %>% smart.round                         ### apply smart round to listed column and unlist
+  )}) %>%
+  select_if(str_detect(names(.),"rounded_vars") | str_detect(names(.),"msoa11cd"))
+
+names(ns_sec_constraint)[2:8] <- category_names
+
+# check total match
+ns_sec_constraint %>%
+  mutate(total = rowSums(.[2:8])) %>%
+  left_join(target_msoa_pop, by = "msoa11cd") %>%
+  filter(total != target_pop) %>%
+  nrow()
+
+```
+
+### Ethnic group, by economic activity
+Table: https://www.nomisweb.co.uk/census/2011/lc6201ew
+
+```{r}
+ethnicity_economic_activity_orig <- read_csv("census/nomis/final_aggregate_sets/ethnic_group_by_economic_activity.csv")
+
+ethnicity_constraint <- ethnicity_economic_activity_orig %>%
+  select('geography code', contains("Economically active: In employment: Total")) %>%
+  select('geography code', contains("Age: All categories")) %>%
+  select(
+    msoa11cd = "geography code",
+    white = "Age: All categories: Age 16 and over; Economic Activity: Economically active: In employment: Total; Ethnic Group: White: Total; measures: Value",
+    mixed = "Age: All categories: Age 16 and over; Economic Activity: Economically active: In employment: Total; Ethnic Group: Mixed/multiple ethnic group; measures: Value",
+    asian = "Age: All categories: Age 16 and over; Economic Activity: Economically active: In employment: Total; Ethnic Group: Asian/Asian British; measures: Value",
+    black = "Age: All categories: Age 16 and over; Economic Activity: Economically active: In employment: Total; Ethnic Group: Black/African/Caribbean/Black British; measures: Value",
+    other = "Age: All categories: Age 16 and over; Economic Activity: Economically active: In employment: Total; Ethnic Group: Other ethnic group; measures: Value") %>%
+  filter(msoa11cd %in% msoa_vec)
+
+#check number of columns
+ethnicity_constraint %>%
+  ncol()
+
+#check that all totals match
+"Number of rows where new pop is not equal to the target pop"
+ethnicity_constraint %>%
+  mutate(total = rowSums(.[2:6])) %>%
+  left_join(target_msoa_pop, by = "msoa11cd") %>%
+  filter(total != target_pop) %>%
+  nrow()
+```
+
+### Full time, part time, self employed
+Table: https://www.nomisweb.co.uk/census/2011/dc6107ew
+
+Note: it was decided to use age_sex cross-tabulation, as this is already matches the target population.
+
+```{r}
+economic_activity_constraint <- age_sex_economic_activity_orig %>%
+  select("geography code", contains("Sex: All persons")) %>%
+  select("geography code", contains("Age: All categories")) %>%
+  select(
+    msoa11cd = "geography code",
+    self_employed = "Sex: All persons; Age: All categories: Age 16 and over; Economic Activity: Economically active: In employment: Self-employed: Total; measures: Value",
+    part_time = "Sex: All persons; Age: All categories: Age 16 and over; Economic Activity: Economically active: In employment: Employee: Part-time (including full-time students); measures: Value",
+    full_time = "Sex: All persons; Age: All categories: Age 16 and over; Economic Activity: Economically active: In employment: Employee: Full-time (including full-time students); measures: Value"
+  ) %>%
+  filter(msoa11cd %in% msoa_vec)
+
+#check that all totals match
+economic_activity_constraint %>%
+  mutate(total = rowSums(.[2:4])) %>%
+  left_join(target_msoa_pop, by = "msoa11cd") %>%
+  filter(total != target_pop) %>%
+  nrow()
+
+```
+
+### Method of travel to work and distance travelled to work
+Tables: 
+- QS701EW (https://www.nomisweb.co.uk/census/2011/qs701ew)
+- QS702EW (https://www.nomisweb.co.uk/census/2011/qs702ew). 
+
+Note: these two need to be considered together, due to the overlapping work from home field. Method of travel to work offers a lower count for this field than distance travelled to work:
+
+```{r}
+ttw_orig <- read_csv("census/nomis/final_aggregate_sets/method_of_travel_to_work.csv")
+
+distance_to_work_orig <- read_csv("census/nomis/final_aggregate_sets/distance_to_work.csv")
+
+ttw_orig %>%
+  select(msoa11cd = "geography code", work_from_home = contains("Work mainly at or from home")) %>%
+  left_join(distance_to_work_orig %>% select(msoa11cd = "geography code", work_from_home = contains("Work mainly at or from home")), by = "msoa11cd") %>%
+  head(10) %>%
+  pander()
+
+```
+
+But both use the same count of 'people in employment' (this is because they full-time students are not being counted):
+
+```{r}
+#travel to work counts
+"count from travel to work method"
+
+ttw_and_distance_comparison <- ttw_orig %>%
+  select(msoa11cd = "geography code", 
+         ttw_total_count = "Method of Travel to Work: All categories: Method of travel to work; measures: Value",
+         ttw_unemployed_count = "Method of Travel to Work: Not in employment; measures: Value",
+         ttw_wfh = contains("Work mainly at or from home")) %>%
+  mutate(ttw_employed_count = ttw_total_count - ttw_unemployed_count) %>%
+  filter(msoa11cd %in% msoa_vec) %>%
+  select(msoa11cd, ttw_employed_count, ttw_wfh) %>%
+  left_join(target_msoa_pop, by = "msoa11cd")
+
+ttw_and_distance_comparison <- ttw_and_distance_comparison %>% left_join(distance_to_work_orig %>%
+  select(msoa11cd = "geography code", 
+         distance_employed_count = "Distance travelled to work: All categories: Distance travelled to work; measures: Value",
+         distance_wfh = contains("Work mainly at or from home")), by = "msoa11cd")
+    
+ttw_and_distance_comparison <- ttw_and_distance_comparison %>%
+  mutate(
+    ttw_wfh_percent = (ttw_wfh/ttw_employed_count)*100,
+    distance_wfh_percent = (distance_wfh/distance_employed_count)*100)
+    
+ttw_and_distance_comparison %>%
+  head(10) %>%
+  pander(split.table = Inf)
+
+ttw_and_distance_comparison %>%
+  summarise(
+    mean_wfh_from_distance = mean(distance_wfh_percent),
+    mean_wfh_from_ttw = mean(ttw_wfh_percent)    
+  ) %>%
+  pander(split.table = Inf)
+```
+
+Some advice on the discrepancy here: https://www.surreyi.gov.uk/dataset/20xxj/census-people-characteristics-method-of-travel-to-work
+
+We'll rebase the distance to work table, take the work from home count from this, bring this to the method of travel to work table, and scale down the other categories so that the population matches the target (essentially, we're assuming that the distribution of methods of travel to work holds - even once these additional home workers are taken into account):
+
+```{r}
+distance_to_work_constraint <- distance_to_work_orig %>% select(
+                        msoa11cd = "geography code",
+                less_than_two_km = "Distance travelled to work: Less than 2km; measures: Value",
+           two_to_less_than_five = "Distance travelled to work: 2km to less than 5km; measures: Value",
+           five_to_less_than_ten = "Distance travelled to work: 5km to less than 10km; measures: Value",
+         ten_to_less_than_twenty = "Distance travelled to work: 10km to less than 20km; measures: Value",
+      twenty_to_less_than_thirty = "Distance travelled to work: 20km to less than 30km; measures: Value",
+       thirty_to_less_than_forty = "Distance travelled to work: 30km to less than 40km; measures: Value",
+        forty_to_less_than_sixty = "Distance travelled to work: 40km to less than 60km; measures: Value",
+                 more_than_sixty = "Distance travelled to work: 60km and over; measures: Value",
+         work_from_home_distance = "Distance travelled to work: Work mainly at or from home; measures: Value",
+                           other = "Distance travelled to work: Other; measures: Value") %>%
+               filter(msoa11cd %in% msoa_vec)
+
+#redistribute other proportionately among the defined categories
+distance_to_work_constraint <- distance_to_work_constraint %>%
+      mutate(total_without_other = rowSums(.[2:10]),
+                less_than_two_km = ((less_than_two_km / total_without_other) * other) + less_than_two_km,
+           two_to_less_than_five = ((two_to_less_than_five / total_without_other) * other) + two_to_less_than_five,
+           five_to_less_than_ten = ((five_to_less_than_ten / total_without_other) * other) + five_to_less_than_ten,           
+         ten_to_less_than_twenty = ((ten_to_less_than_twenty / total_without_other) * other) + ten_to_less_than_twenty,           
+      twenty_to_less_than_thirty = ((twenty_to_less_than_thirty / total_without_other) * other) + twenty_to_less_than_thirty,
+       thirty_to_less_than_forty = ((thirty_to_less_than_forty / total_without_other) * other) + thirty_to_less_than_forty,           
+        forty_to_less_than_sixty = ((forty_to_less_than_sixty / total_without_other) * other) + forty_to_less_than_sixty,
+                 more_than_sixty = ((more_than_sixty / total_without_other) * other) + more_than_sixty,           
+         work_from_home_distance = ((work_from_home_distance / total_without_other) * other) + work_from_home_distance) %>%
+  select(-other, -total_without_other)
+
+#now, we need to get the whole table up to the target population total
+distance_to_work_constraint %>%
+  mutate(new_total = rowSums(.[2:10])) %>%
+  left_join(target_msoa_pop, by = "msoa11cd") %>%
+  select(msoa11cd, new_total, target_pop) %>%
+  head(10) %>%
+  pander()
+
+#apply the multiplying function and round
+ncol(distance_to_work_constraint)
+
+category_names <- distance_to_work_constraint[2:10] %>% 
+                  colnames()
+
+##rebase and integerise
+distance_to_work_constraint <- distance_to_work_constraint %>%                        
+  mutate(original_pop = rowSums(.[2:10])) %>%                          
+  left_join(target_msoa_pop, by = "msoa11cd") %>%                       
+  mutate_at(vars(2:10), list(~.*(target_pop/original_pop))) %>%                   
+  by_row(.collate = "cols", ..f = function(this_row) {                           
+  data.frame(
+    rounded_vars = this_row[2:10] %>% unlist %>% smart.round                     
+  )}) %>%
+  select_if(str_detect(names(.),"rounded_vars") | str_detect(names(.),"msoa11cd"))  
+
+names(distance_to_work_constraint)[2:10] <- category_names
+
+#now, the totals match the target population and we have no 'other' category
+distance_to_work_constraint %>%
+  mutate(new_pop = rowSums(.[2:10])) %>%
+  left_join(target_msoa_pop, by = "msoa11cd") %>%
+  filter(new_pop != target_pop)
+
+```
+
+Now, we want to take this work from home total into the method of travel to work category, and then rebase the other categories (downwards) so that the total matches.
+
+```{r}
+ttw_orig %>%
+  colnames()
+
+ttw_constraint <- ttw_orig %>%
+  select(
+    msoa11cd = "geography code",
+    metro_light_rail_etc = "Method of Travel to Work: Underground, metro, light rail, tram; measures: Value",
+    train = "Method of Travel to Work: Train; measures: Value",
+    bus = "Method of Travel to Work: Bus, minibus or coach; measures: Value",
+    taxi = "Method of Travel to Work: Taxi; measures: Value",
+    motorcycle = "Method of Travel to Work: Motorcycle, scooter or moped; measures: Value",
+    driving_a_car = "Method of Travel to Work: Driving a car or van; measures: Value",
+    passenger_in_a_car = "Method of Travel to Work: Passenger in a car or van; measures: Value",
+    bicycle = "Method of Travel to Work: Bicycle; measures: Value",
+    on_foot = "Method of Travel to Work: On foot; measures: Value") %>%
+  filter(msoa11cd %in% msoa_vec) %>%
+  left_join(distance_to_work_constraint %>% select(msoa11cd, work_from_home_ttw = "work_from_home_distance"), by = "msoa11cd")
+
+ttw_constraint %>%
+  head(10) %>%
+  pander(split.table = Inf)
+
+category_names <- ttw_constraint[2:11] %>% 
+                  colnames()
+
+ttw_constraint <- ttw_constraint %>%
+  mutate(current_pop = rowSums(.[2:11])) %>%
+  left_join(target_msoa_pop, by = "msoa11cd") %>%
+  mutate(target_minus_wfh = target_pop - work_from_home_ttw,
+         multiplier = target_minus_wfh / rowSums(.[2:10])) %>%    #2:10 because we don't want to include the wfh category
+  mutate_at(vars(2:10), list(~.*multiplier)) %>%
+  select(-current_pop, -target_pop, - target_minus_wfh, -multiplier) %>%                   
+  by_row(.collate = "cols", ..f = function(this_row) {                           
+  data.frame(
+    rounded_vars = this_row[2:11] %>% unlist %>% smart.round             
+  )}) %>%
+  select_if(str_detect(names(.),"rounded_vars") | str_detect(names(.),"msoa11cd"))
+
+names(ttw_constraint)[2:11] <- category_names
+
+ttw_constraint %>%
+  mutate(constraint_total = rowSums(.[2:11])) %>%
+  left_join(target_msoa_pop, by = "msoa11cd") %>%
+  head(10) %>%
+  pander(split.table = Inf)
+
+```
+
+### Highest level of qualification
+Table: LC5601EW: https://www.nomisweb.co.uk/census/2011/lc5601ew
+
+Notes: 
+- The in employment count for this table is slightly lower than for the others. This is because it only counts those in employment between the ages of 16 to 64, whereas other tables use 16 to 74, or no age related cap.
+- The 'other' appeared to match up between USD and the census, so this will be retained in this case. However, due to ambiguity in the us data, we must merge the level one and level two qualifications category:
+
+```{r}
+highest_qual_econon_act_orig <- read_csv("census/nomis/final_aggregate_sets/highest_qual_by_economic_activity.csv")
+
+highest_qual_econon_act_orig %>% colnames()
+
+highest_qual_econon_act_orig %>%
+  select(msoa11cd = contains("geography code"),
+         in_employment_count = "Highest Level of Qualification: All categories: Highest level of qualification; Economic Activity: Economically active: In employment: Total; measures: Value") %>%
+  filter(msoa11cd %in% msoa_vec) %>%
+  left_join(target_msoa_pop, by = "msoa11cd")
+
+qualification_constraint <- highest_qual_econon_act_orig %>% 
+  select("geography code", contains("Economically active: Total")) %>%
+  select("geography code", !contains("Highest Level of Qualification: All categories")) %>% 
+  select(
+           msoa11cd = "geography code",
+    level_four_plus = "Highest Level of Qualification: Level 4 qualifications and above; Economic Activity: Economically active: Total; measures: Value",
+        level_three = "Highest Level of Qualification: Level 3 qualifications; Economic Activity: Economically active: Total; measures: Value",
+          level_two = "Highest Level of Qualification: Level 2 qualifications; Economic Activity: Economically active: Total; measures: Value",
+          level_one = "Highest Level of Qualification: Level 1 qualifications; Economic Activity: Economically active: Total; measures: Value",
+   no_qualification = "Highest Level of Qualification: No qualifications; Economic Activity: Economically active: Total; measures: Value",
+other_qualification = "Highest Level of Qualification: Apprenticeships and other qualifications; Economic Activity: Economically active: Total; measures: Value") %>%
+  filter(msoa11cd %in% msoa_vec)
+
+#we need to merge one and two, due to ambiguity in the usd data
+qualification_constraint <- qualification_constraint %>%
+  mutate(level_one_or_level_two = level_two + level_one) %>%
+  select(msoa11cd, level_one_or_level_two, level_three, level_four_plus, no_qualification, other_qualification)
+
+qualification_constraint
+
+qualification_constraint %>%
+  ncol()
+
+category_names <- qualification_constraint[2:6] %>% 
+                  colnames()
+
+qualification_constraint <- qualification_constraint %>%
+  mutate(
+    census_total = rowSums(.[2:6])) %>%
+  left_join(target_msoa_pop, by = "msoa11cd") %>%
+  mutate(multiplier = target_pop / census_total) %>%
+  mutate_at(vars(2:6), list(~.*multiplier)) %>%
+  select(-census_total, -target_pop, -multiplier) %>%                   
+  by_row(.collate = "cols", ..f = function(this_row) {                           
+  data.frame(
+    rounded_vars = this_row[2:6] %>% unlist %>% smart.round             
+  )}) %>%
+  select_if(str_detect(names(.),"rounded_vars") | str_detect(names(.),"msoa11cd"))
+
+names(qualification_constraint)[2:6] <- category_names
+
+qualification_constraint %>%
+  left_join(target_msoa_pop, by = "msoa11cd") %>%
+  mutate(
+    census_total = rowSums(.[2:6]))
+```
+
+### Car or van availability
+LC4609EW: https://www.nomisweb.co.uk/census/2011/lc4609ew. 
+
+Note: 
+- This version of the census variable overcomes the issue highlighted by Lovelace, who highlights that using the distribution of _household_ car or van availability as a proxy for individual availability within a zone would lead to the under-counting of people with access to multiple cars because larger households are more likely to have a greater number of cars. 
+- Very small difference between the target population and the in employment count. This is because it uses people aged 16 and over who live in households. This excludes people who live in communal establishments (see ONS 2019: https://www.ons.gov.uk/peoplepopulationandcommunity/birthsdeathsandmarriages/families/articles/familiesandhouseholdsstatisticsexplained/2019-08-07)
+
+```{r}
+car_van_econon_act_orig <- read_csv("census/nomis/final_aggregate_sets/car_van_availability_economic_activity.csv")
+
+car_van_econon_act_orig %>%
+  select(msoa11cd = "geography code",
+         in_employment_count = "Cars or Vans: All categories: Car or van availability; Economic Activity: Economically active: In employment: Total; measures: Value") %>%
+  filter(msoa11cd %in% msoa_vec) %>%
+  left_join(target_msoa_pop, by = "msoa11cd")
+
+car_van_constraint <- car_van_econon_act_orig %>%
+  select("geography code", !contains("Cars or Vans: All categories: Car or van availability")) %>%
+  select("geography code", contains(" Economically active: Total")) %>%
+  select(
+    msoa11cd = "geography code",
+    no_cars = "Cars or Vans: No cars or vans in household; Economic Activity: Economically active: Total; measures: Value",
+    one_car = "Cars or Vans: 1 car or van in household; Economic Activity: Economically active: Total; measures: Value",
+    two_or_more_cars = "Cars or Vans: 2 or more cars or vans in household; Economic Activity: Economically active: Total; measures: Value") %>%
+  filter(msoa11cd %in% msoa_vec)
+
+car_van_constraint
+
+#get category names
+category_names <- car_van_constraint %>% 
+                  select(!msoa11cd) %>%
+                  colnames()
+
+ncol(car_van_constraint)
+
+##rebase
+car_van_constraint <- car_van_constraint %>%                        
+  mutate(original_pop = rowSums(.[2:4])) %>%                          
+  left_join(target_msoa_pop, by = "msoa11cd") %>%                              
+  mutate_at(vars(2:4), list(~.*(target_pop/original_pop))) %>%                   
+  by_row(.collate = "cols", ..f = function(this_row) {                           
+  data.frame(
+    rounded_vars = this_row[2:4] %>% unlist %>% smart.round                     
+  )}) %>%
+  select_if(str_detect(names(.),"rounded_vars") | str_detect(names(.),"msoa11cd"))  
+
+names(car_van_constraint)[2:4] <- category_names
+
+car_van_constraint %>%                        
+  mutate(new_pop = rowSums(.[2:4])) %>%
+  left_join(target_msoa_pop, by = "msoa11cd")
+
+```
+
+### Tenure
+Table: LC4601EW (https://www.nomisweb.co.uk/census/2011/lc4601ew)
+
+Notes: 
+- Person-based counts of tenure by economic activity were not available from Nomis. This table was used instead, which provides a count of tenure of the household reference person were chosen. Unlike car ownership, there was no immediately apparent reason why a household level count would skew the data towards one particular category. 
+- There was no category for 'other', as there is in the microdata. As a result, it was decided to exclude 'other' cases from the microdataset (in effect, treating them as NAs).
+- As expected due to the count of household reference people, as opposed to persons, the total number of people within each msoa is less for this constraint.
+
+```{r}
+tenure_econ_act_orig <- read_csv("census/nomis/final_aggregate_sets/tenure_economic_activity.csv")
+
+tenure_constraint <- tenure_econ_act_orig %>%
+  select("geography code", contains("Age: All categories: Age 16 and over")) %>%
+  select("geography code", contains("In employment: Total; measures: Value")) %>%
+  select(
+    msoa11cd = "geography code",
+    private_rented = "Age: All categories: Age 16 and over; Tenure: Rented: Private rented or living rent free; Economic Activity: Economically active: In employment: Total; measures: Value",
+    social_rented = "Age: All categories: Age 16 and over; Tenure: Rented: Social rented; Economic Activity: Economically active: In employment: Total; measures: Value",
+    owned = "Age: All categories: Age 16 and over; Tenure: Owned or shared ownership: Total; Economic Activity: Economically active: In employment: Total; measures: Value") %>%
+  filter(msoa11cd %in% msoa_vec)
+
+category_names <- tenure_constraint%>% 
+                  select(!msoa11cd) %>%
+                  colnames()
+
+ncol(tenure_constraint)
+
+tenure_constraint
+
+##rebase
+tenure_constraint <- tenure_constraint %>%                        
+  mutate(original_pop = rowSums(.[2:4])) %>%                          
+  left_join(target_msoa_pop, by = "msoa11cd") %>%                              
+  mutate_at(vars(2:4), list(~.*(target_pop/original_pop))) %>%                   
+  by_row(.collate = "cols", ..f = function(this_row) {                           
+  data.frame(
+    rounded_vars = this_row[2:4] %>% unlist %>% smart.round                     
+  )}) %>%
+  select_if(str_detect(names(.),"rounded_vars") | str_detect(names(.),"msoa11cd"))  
+
+names(tenure_constraint)[2:4] <- category_names
+
+tenure_constraint
+
+```
+
+### Rural-urban constraint
+NON-NOMIS DATA: https://geoportal.statistics.gov.uk/datasets/0af77205a4644af3af2175d21a4ef4db_0
+
+Note:
+- This variable was selected because it was used in Lovelace (4.6: http://jasss.soc.surrey.ac.uk/18/2/21.html). It was also selected because it might highlight some particualrly pertinent interactions from a transport perspective - which are relevant to income. For example, individuals who travel long distances to work from countryside housing. This constraint worked differently from others - because it gives all people (100% of the count) of people within each area the same characteristic
+
+```{r}
+urban_rural_orig <- read_csv("census/urban_rural/urban_rural.csv")
+  
+urban_rural_constraint <- urban_rural_orig %>%
+  select(msoa11cd = "MSOA11CD", RUC11) %>%
+  mutate(urban_rural_designation = case_when(
+           str_detect(RUC11, "Urban ", negate = FALSE) ~ "urban",
+           str_detect(RUC11, "Rural ", negate = FALSE) ~ "rural"
+           )) %>%
+  filter(msoa11cd %in% msoa_vec) %>%
+  left_join(target_msoa_pop, by = "msoa11cd") %>%
+  mutate(
+    urban = case_when(urban_rural_designation == "urban" ~ target_pop,
+                                                    TRUE ~ as.numeric(0)),
+    rural = case_when(urban_rural_designation == "rural" ~ target_pop,
+                                                    TRUE ~ as.numeric(0)),
+    ) %>%
+  select(msoa11cd, urban, rural)
+
+```
+
+### Join all the tables together
+
+```{r}
+all_constraints <- tibble(msoa11cd = msoa_vec) %>%
+  left_join(age_sex_constraint_w_econ_act, by = "msoa11cd") %>%
+  left_join(ns_sec_constraint, by = "msoa11cd") %>%
+  left_join(ethnicity_constraint, by = "msoa11cd") %>%
+  left_join(economic_activity_constraint, by = "msoa11cd") %>%
+  left_join(distance_to_work_constraint, by = "msoa11cd") %>%
+  left_join(ttw_constraint, by = "msoa11cd") %>%
+  left_join(qualification_constraint, by = "msoa11cd") %>%
+  left_join(car_van_constraint, by = "msoa11cd") %>%
+  left_join(tenure_constraint, by = "msoa11cd") %>%
+  left_join(urban_rural_constraint, by = "msoa11cd")
+
+all_constraints
+
+```
+
+#### Write to file
+
+```{r}
+all_constraints %>%
+  write_csv("processed_data/census_constraints/constraints_13_08_20.csv")
+```
