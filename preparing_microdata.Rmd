@@ -1,0 +1,853 @@
+---
+title: "Preparing Understanding Society data"
+output: html_notebook
+---
+
+```{r setup}
+library(tidyverse)
+library(haven)
+library(readxl)
+library(sjPlot)
+library(measurements)
+knitr::opts_knit$set(root.dir = "J:/mydocuments/dissertation")
+```
+
+This script will process the following variables from Understanding Society wave 8 [(University of Essex et al 2018)](http://doi.org/10.5255/UKDA-SN-6614-13):
+
+```{r linked_understanding_society_fields}
+usd_variables <- tibble(
+     variable_code = c(
+                      "ethn_dv", 
+                      "jbsoc10_cc",
+                      "jbstat",
+                      "worktrav",
+                      "jsworktrav",
+                      "workdis", 
+                      "age_dv",
+                      "sex_dv",
+                      "ncars",
+                      "fimnnet_dv",
+                      "fihhmnnet1_dv",
+                      "hhsize",
+                      "gor_dv",
+                      "tenure_dv",
+                      "ieqmoecd_dv",
+                      "jbft_dv",
+                      "jbpl",
+                      "jspl",
+                      "jbnssec8_dv",
+                      "hiqual_dv",
+                      "urban_dv",
+                      "intdaty_dv",
+                      "intdatm_dv"),
+     
+             name  = c(
+                      "Ethnic group (derived from multiple sources)",
+                      "Current job: SOC 2010, condensed", 
+                      "Current labour force status",
+                      "mode of transport for journey to work",
+                      "usual mode of transport taken to place of work (self-employed)",
+                      "distance from work",
+                      "Age, derived from dob_dv and intdat_dv", 
+                      "Sex, derived",
+                      "number of cars/vans owned by household",
+                      "total net personal income - no deductions",
+                      "net household monthly income",
+                      "number of individuals in the household",
+                      "government office region",
+                      "housing tenure",
+                      "Modified OECD equivalence scale",
+                      "Full or part-time employee",
+                      "work location",
+                      "s/emp:work location",
+                      "Current job: Eight Class NS-SEC",
+                      "Highest qualification, UKHLS & BHPS samples",
+                      "Urban or rural area, derived",
+                      "Interview date: Year, derived",
+                      "Interview date: Month, derived"),
+              
+        survey_unit = c(
+                      "indresp",
+                      "indresp",
+                      "indresp",
+                      "indresp",
+                      "indresp",
+                      "indresp",
+                      "indresp",
+                      "indresp",
+                      "hhresp",
+                      "indresp",
+                      "hhresp",
+                      "hhresp",
+                      "indresp",
+                      "hhresp",
+                      "hhresp",
+                      "indresp",
+                      "indresp",
+                      "indresp",
+                      "indresp",
+                      "indresp",
+                      "indresp",
+                      "indresp",
+                      "indresp"),
+     
+             waves = c("all",
+                       "all",
+                       "all",
+                       "all",
+                       "1, 2, 4, 6, 8",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all",
+                       "all"),
+     
+             type = c(
+                      "constraint", 
+                      "constraint", 
+                      "constraint", 
+                      "constraint", 
+                      "constraint",
+                      "constraint", 
+                      "constraint", 
+                      "constraint", 
+                      "constraint", 
+                      "target", 
+                      "target", 
+                      "target",
+                      "filter variable",
+                      "constraint",
+                      "target",
+                      "constraint",
+                      "constraint",
+                      "constraint",
+                      "constraint",
+                      "constraint",
+                      "constraint",
+                      "admin",
+                      "admin"),
+
+             link = c(
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/ethn_dv",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/jbsoc10_cc",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/jbstat",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/worktrav",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/jsworktrav",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/workdis",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/age_dv",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/sex_dv",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/ncars",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/fimnnet_dv",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/fihhmnnet1_dv",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/hhsize",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/gor_dv",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/tenure_dv",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/ieqmoecd_dv",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/jbft_dv",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/jbpl",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/jspl",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/jbnssec8_dv",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/hiqual_dv",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/urban_dv",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/intdaty_dv",
+                      "https://www.understandingsociety.ac.uk/documentation/mainstage/dataset-documentation/variable/intdatm_dv"))
+
+usd_variables
+```
+
+Individual response data:
+
+```{r get understanding society data for individuals}
+#get wave 9
+ind_wave_8 <- read_spss("understanding_society/UKDA-6614-spss/spss/spss24/ukhls_w8/h_indresp.sav")
+```
+
+Make a vector of variable names:
+
+```{r}
+ind_var_codes_vec <- usd_variables %>%
+  filter(survey_unit == "indresp") %>% #all the individual response codes from the table above
+  select(variable_code) %>%
+  mutate(variable_code = paste0("h_", variable_code, sep = "")) %>%
+  as_vector() %>%
+  c("pidp", "h_hidp") %>% #the UID codes
+  unname()
+```
+
+Subset the full response table, to obtain just the variables of interest:
+
+```{r}
+ind_subset <- subset(ind_wave_8, select = ind_var_codes_vec) %>%
+  select(pidp, h_hidp, everything())
+```
+
+Summarise each value, and tally missings:
+
+```{r}
+list <- map(ind_subset %>% select(-pidp, -h_hidp) %>% names() %>% set_names(),
+          ~ ind_subset %>%
+            as_factor(only_labelled = TRUE) %>%
+            group_by_at(.x) %>%
+            summarise(Count = n()))
+
+list
+
+#show all the labels for each of the columns we are working with ...
+sjPlot::view_df(ind_subset, max.len = 100)
+
+list$h_jbstat %>%
+  filter(!h_jbstat %in% c("Self employed", "Paid employment(ft/pt)")) %>%
+  summarise(sum(Count))
+
+```
+
+'Missing' fields are -9 (missing), -7 (proxy, where this question isn't asked), -2 (refusal), and -1 (don't know). Inapplicable (-8), is a bit more complicated. It often means that a person can't respond to the question. A response may be imputed from another variable.
+
+Create a vector of NA values:
+
+```{r}
+#lots of text in amongst the numeric values ...
+na_values_vec <- c("missing", "inapplicable", "proxy", "refusal", "don't know")
+```
+
+Create economic_activity field:
+
+```{r}
+ind_subset <- ind_subset %>% mutate(
+                              h_jbstat = as.character(as_factor(h_jbstat)),
+                              h_jbft_dv = as.character(as_factor(h_jbft_dv)),
+                              economic_activity = case_when(
+                                h_jbstat == "Self employed" ~ "self_employed",
+                               h_jbft_dv ==  "PT employee"  ~ "part_time",
+                               h_jbft_dv ==  "FT employee"  ~ "full_time"
+                              ))
+```
+
+Filter out people not in employment:
+
+```{r}
+ind_subset <- ind_subset %>% filter(economic_activity %in% c("self_employed", "part_time", "full_time"))
+
+#create a lookup table
+travel_to_work_lookup <- tibble(
+  usd = c("Get a lift with someone outside the household",
+          "Get a lift with someone from household",
+          "Underground/Metro/Tram/Light railway",
+          "Drive myself by car or van",
+          "Motorcycle/moped/scooter",
+          "Taxi/minicab",
+          "Bus/coach",
+          "Train",
+          "Cycle",
+          "Walk",
+          "Other"),
+  
+census = c("passenger_in_a_car",
+           "passenger_in_a_car",
+           "metro_light_rail_etc",
+           "driving_a_car",
+           "motorcycle",
+           "taxi",
+           "bus",
+           "train",
+           "bicycle",
+           "on_foot",
+           "other"))
+
+travel_to_work_lookup
+
+#create a vector for matching ...
+travel_to_work_lookup_vec <- 
+  setNames(travel_to_work_lookup$census, travel_to_work_lookup$usd)
+
+mobile_worker_categories <- c("From a van or stall", "Driving or travelling around", "From client's or customer's premises", "Or at one or more other places?")
+
+
+ind_subset %>% filter(economic_activity == "Self employed")
+
+#convert the relevant fields to characters
+ind_subset <- ind_subset %>%
+  mutate(
+    h_jbpl = as.character(as_factor(h_jbpl)),
+    h_jspl = as.character(as_factor(h_jspl)),
+    h_worktrav = as.character(as_factor(h_worktrav)),
+    h_jsworktrav = as.character(as_factor(h_jsworktrav)))
+
+#set new categorical field
+ind_subset <- ind_subset %>%
+  mutate(method_of_travel_to_work =
+           case_when(
+         h_jbpl %in% c("At home", "From their own home")           ~ "work_from_home_ttw",
+         h_jspl %in% c("At home", "From their own home")           ~ "work_from_home_ttw",
+                       h_jbstat == "Paid employment(ft/pt)"        ~ travel_to_work_lookup_vec[h_worktrav],
+                       h_jbstat == "Self employed"                 ~ travel_to_work_lookup_vec[h_jsworktrav]))
+
+ind_subset <- ind_subset %>%
+  mutate(                                            
+         method_of_travel_to_work =                  #find travel to work values for self-employed from the non-se ttw field
+           if_else(is.na(method_of_travel_to_work) &
+                       h_jbstat == "Self employed" &
+                     !h_worktrav %in% na_values_vec, #then 
+             travel_to_work_lookup_vec[h_worktrav], method_of_travel_to_work),
+         
+         method_of_travel_to_work =                  #find travel to work values for normal employed from the se ttw field
+           if_else(is.na(method_of_travel_to_work) & 
+                       h_jbstat == "Paid employment(ft/pt)" &
+                     !h_jsworktrav %in% na_values_vec, #then 
+             travel_to_work_lookup_vec[h_jsworktrav], method_of_travel_to_work),
+
+        method_of_travel_to_work =                   #find wfh values for se in non-se workplace field
+          if_else(is.na(method_of_travel_to_work) &
+                      h_jbstat == "Self employed" &
+                     h_jbpl %in% c("At home", "From their own home"), #then
+                                "work_from_home_ttw", method_of_travel_to_work),
+        
+        method_of_travel_to_work =                   #find wfh values for non-se in se workplace field
+          if_else(is.na(method_of_travel_to_work) &
+                      h_jbstat == "Paid employment(ft/pt)" &
+                     h_jspl %in% c("At home", "From their own home"), #then
+                                "work_from_home_ttw", method_of_travel_to_work)) %>%
+  
+    mutate(method_of_travel_to_work = case_when(     #replace 'other' with NA
+      method_of_travel_to_work == "other" ~ as.character(NA),
+                                     TRUE ~ method_of_travel_to_work
+  ))
+
+```
+
+Work distance:
+
+```{r}
+#create a new field which just takes the non-na values from the main survey column, and replaces 
+#this with a numeric value for the distance. 0s go to people who work from home. Others resolve to NA.
+
+ind_subset <- ind_subset %>%
+  mutate(
+    distance_to_work_miles = case_when(
+                             method_of_travel_to_work == "work_from_home_ttw" ~ as.numeric(0),
+                                     h_workdis %in% c(-9, -8, -7, -2, -1) ~ as.numeric(NA),
+                                                                     TRUE ~ as.numeric(h_workdis)))
+
+#looks good. Now convert to km
+ind_subset <- ind_subset %>%
+  mutate(
+    distance_to_work_km = round(conv_unit(distance_to_work_miles, "mi", "km"), 1))
+
+#and check ...
+ind_subset %>%
+  select(distance_to_work_miles, h_workdis, distance_to_work_km)
+
+#now bin it, based on the values given in the census
+distance_travelled_to_work_agg <- read_csv("census/nomis/distance_travelled_to_work.csv")
+
+distance_travelled_to_work_agg[6:17] %>%
+  colnames() %>%
+  as_tibble()
+
+ind_subset <- ind_subset %>%
+  mutate(distance_category = case_when(
+    method_of_travel_to_work == "work_from_home_ttw" ~ "work_from_home_distance",
+    distance_to_work_km <2 ~ "less_than_two_km",
+    distance_to_work_km <5 ~ "two_to_less_than_five",
+    distance_to_work_km <10 ~ "five_to_less_than_ten",
+    distance_to_work_km <20 ~ "ten_to_less_than_twenty",
+    distance_to_work_km <30 ~ "twenty_to_less_than_thirty",
+    distance_to_work_km <40 ~ "thirty_to_less_than_forty",
+    distance_to_work_km <60 ~ "forty_to_less_than_sixty",
+    distance_to_work_km >= 60 ~ "more_than_sixty"))
+```
+
+NS-SEC:
+
+```{r}
+ind_subset <- ind_subset %>%
+  mutate(
+    h_jbnssec8_dv = as.character(as_factor(h_jbnssec8_dv)),
+    ns_sec_category = 
+    case_when(
+      h_jbnssec8_dv == "Large employers & higher management" ~ "one",
+      h_jbnssec8_dv == "Higher professional" ~ "one",
+      h_jbnssec8_dv == "Lower management & professional" ~ "two",
+      h_jbnssec8_dv == "Intermediate" ~ "three",
+      h_jbnssec8_dv == "Small employers & own account" ~ "four",
+      h_jbnssec8_dv == "Lower supervisory & technical" ~ "five",
+      h_jbnssec8_dv == "Semi-routine" ~ "six",
+      h_jbnssec8_dv == "Routine" ~ "seven"))
+
+```
+
+Age:
+
+```{r}
+#compare census and usd ...
+ns_sec_by_sex_by_age <- read_csv("census/nomis/ns_sec_by_sex_by_age.csv")
+
+#create banded variable ...
+ind_subset <- ind_subset %>%
+  mutate(
+        h_age_dv = as.numeric(as.character(as.factor(h_age_dv))), #convert to numeric from SPSS factor
+     age_banding = case_when(
+        h_age_dv %in% c(-9, -8, -2, -1) ~ as.character(NA),
+                         h_age_dv < 25  ~ "16_24",
+                         h_age_dv < 35  ~ "25_34",
+                         h_age_dv < 50  ~ "35_49",
+                         h_age_dv < 65  ~ "50_64",
+                         h_age_dv < 103 ~ "65_plus"))
+```
+
+Create age and sex variable:
+
+```{r}
+ind_subset <- ind_subset %>% mutate(
+                  sex = case_when(
+                               as.character(as_factor(h_sex_dv)) == "Female" ~ "f",
+                               as.character(as_factor(h_sex_dv)) == "Male" ~ "m"),
+              age_sex = case_when(
+                               sex %in% c("f", "m") ~ paste0(sex, "_", age_banding)))
+```
+
+Ethnic group (categories taken from: https://www.researchgate.net/publication/321243183_Microsimulation_for_demography):
+
+```{r}
+#get census data for category matching ... 
+ethnic_group_agg <- read_csv("census/nomis/ethnic_group.csv")
+
+ethnic_group_agg %>%
+  colnames()
+
+#check usd data ...
+ind_subset %>%
+  group_by(h_ethn_dv) %>%
+  tally() %>%
+  mutate(
+    percent_of_total = round((n / sum(n))*100, 1)
+  ) %>%
+  arrange(desc(percent_of_total))
+
+#create a lookup table ...
+ethnicity_conversion_table <- tibble(
+  super_condensed_category = c(
+                      "asian",
+                      "black",
+                      "black",
+                      "asian",
+                      "asian",
+                      "mixed",
+                      "mixed",
+                      "mixed",
+                      "mixed",
+                      "asian",
+                      "black",
+                      "other",
+                      "other",
+                      "asian",
+                      "white",
+                      "white",
+                      "white",
+                      "white"),
+  
+  condensed_category = c(
+                      "Bangladeshi",
+                      "Black African",
+                      "Black Caribbean",
+                      "Chinese",
+                      "Indian",
+                      "Mixed",
+                      "Mixed",
+                      "Mixed",
+                      "Mixed",
+                      "Other Asian",
+                      "Other Black",
+                      "Other",
+                      "Other",
+                      "Pakistani", 
+                      "White British", 
+                      "White Other",
+                      "White Other",
+                      "White Other"),
+  
+  cenesus_categories = c(
+                      "Asian/Asian British: Bangladeshi", 
+                      "Black/African/Caribbean/Black British: African", 
+                      "Black/African/Caribbean/Black British: Caribbean",
+                      "Asian/Asian British: Chinese",
+                      "Asian/Asian British: Indian",
+                      "Mixed/multiple ethnic groups: White and Black Caribbean", 
+                      "Mixed/multiple ethnic groups: White and Black African",
+                      "Mixed/multiple ethnic groups: White and Asian",
+                      "Mixed/multiple ethnic groups: Other",
+                      "Asian/Asian British: Other",
+                      "Black/African/Caribbean/Black British: Other Black",
+                      "Other ethnic group: Arab",
+                      "Other ethnic group: Any other ethnic group",
+                      "Asian/Asian British: Pakistani",
+                      "White: English/Welsh/Scottish/Northern Irish/British",
+                      "White: Irish",
+                      "White: Gypsy or Irish Traveller",
+                      "White: Other White"),
+  
+  usd_categories = c(
+                      "bangladeshi",
+                      "african",
+                      "caribbean",
+                      "chinese",
+                      "indian",
+                      "white and black caribbean",
+                      "white and black african",
+                      "white and asian",
+                      "any other mixed background",
+                      "any other asian background",
+                      "any other black background",
+                      "arab",
+                      "any other ethnic group",
+                      "pakistani",
+                      "british/english/scottish/welsh/northern irish",
+                      "irish",
+                      "gypsy or irish traveller",
+                      "any other white background"
+                    ))
+
+#create a lookup vector to use for matching and returning values ...
+usd_condensed_ethnicity_lookup <- 
+  setNames(ethnicity_conversion_table$condensed_category, ethnicity_conversion_table$usd_categories)
+
+#convert from Haven labelled ...
+ind_subset <- ind_subset %>%
+              mutate(
+                    h_ethn_dv = as.character(as_factor(h_ethn_dv)),
+                    condensed_ethnicity = usd_condensed_ethnicity_lookup[as.character(h_ethn_dv)])
+```
+```{r}
+usd_super_condensed_ethnicity_lookup <- 
+  setNames(ethnicity_conversion_table$super_condensed_category, ethnicity_conversion_table$usd_categories)
+
+ind_subset <- ind_subset %>%
+              mutate(
+                    super_condensed_ethnicity = usd_super_condensed_ethnicity_lookup[as.character(h_ethn_dv)])
+```
+
+Case study region field (region is one of East Midlands, North West, Yorkshire and the Humber):
+
+```{r}
+regions_vec <- c("North West", "Yorkshire and the Humber", "East Midlands")
+
+ind_subset <- ind_subset %>%
+  mutate(region = case_when(
+    h_gor_dv %in% c(-9, -8, -2, -1) ~ as.character(NA),
+                               TRUE ~ as.character(as_factor(h_gor_dv))),
+    
+         region_category = case_when(
+            region %in% regions_vec ~ "From case study regions",
+                               TRUE ~ "Not from case study regions"))
+```
+
+### Highest level of qualification
+Census provides a 6 stage linked variable. See: https://www.gov.uk/what-different-qualification-levels-mean/list-of-qualification-levels Range of usd options available. Summary here: https://iserswww.essex.ac.uk/support/issues/337
+
+```{r}
+highest_qual_agg <- read_csv("census/nomis/highest_level_of_qualification.csv")
+
+highest_qual_agg %>%
+  colnames() %>%
+  as_tibble()
+
+quals_lookup <- tibble(
+  category = c("Level 4 plus", "Level 4 plus", "Level 3", "Level 1 and Level 2", "No qualifications", "Other qualifications"),
+  usd_value = c("Degree", "Other higher degree", "A-level etc", "GCSE etc", "No qualification", "Other qualification"))
+
+ind_subset <- ind_subset %>%
+  mutate(highest_qualification = case_when(
+                                 h_hiqual_dv %in% c(-9, -8, -2, -1) ~ as.character(NA),
+                                                               TRUE ~ as.character(as_factor(h_hiqual_dv))),
+         highest_qual_category = case_when(
+                                 highest_qualification %in% c("Degree", "Other higher degree") ~ "level_four_plus",
+                                 highest_qualification == "A-level etc" ~ "level_three",
+                                 highest_qualification == "GCSE etc" ~ "level_one_or_level_two",
+                                 highest_qualification == "No qualification" ~ "no_qualification",
+                                 highest_qualification == "Other qualification" ~ "other_qualification"))
+```
+
+Urban/rural:
+
+```{r}
+ind_subset <- ind_subset %>% mutate(
+      urban_rural = case_when(
+        h_urban_dv %in% c(-9, -8, -2, -1) ~ as.character(NA),
+                                     TRUE ~ as.character(as_factor(h_urban_dv))),
+      urban_rural = case_when(urban_rural == "urban area" ~ "urban",
+                              urban_rural == "rural area" ~ "rural"))
+```
+
+Month/date of interview:
+
+```{r}
+ind_subset <- ind_subset %>%
+  mutate(
+    interview_month = as.numeric(as.character(as_factor(h_intdatm_dv))),
+    interview_year = as.numeric(as.character(as_factor(h_intdaty_dv))),
+    interview_month_and_year = paste0(interview_month, "_", interview_year))
+```
+
+Income: We need to convert this from haven and then equivilise to 2019 values. Equivilisation advice from [(Fisher et al 2019, p.27)](https://www.understandingsociety.ac.uk/sites/default/files/downloads/working-papers/2019-08.pdf). Index from 'Consumer Price Indices series excluding rents, maintenance repairs and water charges' (see [ONS 2020](https://www.ons.gov.uk/economy/inflationandpriceindices/adhocs/11357consumerpriceindicesseriesexcludingrentsmaintenancerepairsandwaterchargesfortheperiodjanuary1996todecember2019)).
+
+```{r}
+ind_subset <- ind_subset %>%
+  mutate(
+          personal_income = as.numeric(as.character(as_factor(h_fimnnet_dv))),   #convert from haven
+          personal_income = case_when(                                           #catch the negative values (outliers)
+                              personal_income < 0 ~ as.numeric(NA),
+                                             TRUE ~ personal_income))
+#get index
+index_orig <- read.csv("adjust_income/dwp_deflators_feb_2020_csv.csv")
+
+#tidy it
+index <- index_orig %>%
+  mutate(
+    year = as.numeric(str_sub(Index.Date, 1, 4)),
+    month = as.numeric(str_sub(Index.Date, -2, -1)),
+    interview_month_and_year = paste0(month, "_", year),
+    index_base_2015 =  CPI.Index..2015...100.
+  ) %>%
+  as_tibble() %>%
+  select(interview_month_and_year, index_base_2015)
+
+dec_2019_index <- index %>% filter(interview_month_and_year == "12_2019") %>%
+  pull(index_base_2015)
+
+ind_subset <- ind_subset %>%
+  left_join(index, by = "interview_month_and_year")
+
+ind_subset <- ind_subset %>%
+  mutate(personal_income = personal_income * (dec_2019_index / index_base_2015), #rebase
+         personal_income = round(personal_income, 0)) #round
+```
+
+Get household dataset:
+
+```{r get understanding society data for households}
+hh_wave_8 <- read_spss("understanding_society/UKDA-6614-spss/spss/spss24/ukhls_w8/h_hhresp.sav")
+
+hh_wave_8 %>% glimpse()
+
+hh_var_codes_vec <- usd_variables %>%
+                    filter(survey_unit == "hhresp") %>%
+                    select(variable_code) %>%
+                    mutate(variable_code = paste0("h_", variable_code, sep = "")) %>%
+                    as_vector()
+
+hh_admin_var_codes <- "h_hidp"
+
+hh_subset <- subset(hh_wave_8, select = c(hh_var_codes_vec, hh_admin_var_codes)) %>%
+             select(h_hidp, everything())
+
+#show all the labels for each of the columns we are working with ...
+sjPlot::view_df(hh_subset, max.len = 100)
+
+hh_subset
+
+```
+
+Number of cars:
+
+```{r car categorical}
+hh_subset <- hh_subset %>%
+             mutate(hh_number_of_cars = as.numeric(as.character(as_factor(h_ncars))),
+                    hh_cars_category = case_when(
+                      hh_number_of_cars == 0 ~ "no_cars",
+                      hh_number_of_cars == 1 ~ "one_car",
+                      hh_number_of_cars >= 2 ~ "two_or_more_cars"))
+#Check the breakdown ...
+hh_subset %>%
+  group_by(hh_cars_category) %>%
+  tally() %>%
+  mutate(
+    percent_of_total = round((n / sum(n))*100, 1)) %>%
+  arrange(desc(percent_of_total))
+```
+
+Tenure:
+
+```{r tenure}
+tenure_agg <- read_csv("census/nomis/tenure.csv")
+
+tenure_agg %>% colnames()
+
+hh_subset <- hh_subset %>% mutate(
+         h_tenure_dv = as.character(as_factor(h_tenure_dv)),
+    tenure_condensed = case_when(
+       h_tenure_dv %in% c("Local authority rent", "Housing assoc rented")                                   ~ "social_rented",
+       h_tenure_dv %in% c("Rented from employer", "Rented private unfurnished", "Rented private furnished") ~ "private_rented",
+       h_tenure_dv %in% c("Owned outright", "Owned with mortgage")                                          ~ "owned"))
+
+hh_subset %>%
+  group_by(tenure_condensed) %>%
+  tally() %>%
+  mutate(
+    percent_of_total = round((n / sum(n))*100, 1)) %>%
+  arrange(desc(percent_of_total))
+
+```
+
+Income, OECD conversion data and household size fields:
+
+```{r}
+hh_subset <- hh_subset %>% mutate(
+                            household_income = case_when(
+                                      h_fihhmnnet1_dv %in% c(-9 ,-8, -2, -1) ~ as.numeric(NA),
+                                                         h_fihhmnnet1_dv < 1 ~ as.numeric(NA),
+                                                                        TRUE ~ as.numeric(as.character(as_factor(h_fihhmnnet1_dv)))),
+                            household_income = round(household_income, 0),
+                      oecd_equivilance_scale = case_when(
+                                    h_ieqmoecd_dv %in% c(-9 ,-8, -7, -2, -1) ~ as.numeric(NA),
+                                                                        TRUE ~ as.numeric(as.character(as_factor(h_ieqmoecd_dv)))))
+
+```
+
+Household size:
+
+```{r}
+hh_subset <- hh_subset %>% mutate(
+  household_size = h_hhsize)
+```
+
+Merge of the individual and household responses: 
+
+```{r join to individual response table}
+
+glimpse(hh_subset)
+
+usd_microdata <- ind_subset %>%
+  select(                     #select fields from the ind table ...
+    pidp,
+    h_hidp,
+    method_of_travel_to_work,
+    distance_to_work_km,
+    distance_category,
+    ns_sec_category,
+    age_banding,
+    age_sex,
+    condensed_ethnicity,
+    super_condensed_ethnicity,
+    region,
+    region_category,
+    personal_income,
+    highest_qual_category,
+    economic_activity,
+    urban_rural,
+    interview_month_and_year,
+    index_base_2015
+    ) %>%
+  left_join(
+    hh_subset %>%                  
+      select(                   #now select fields from the hh table ...
+        h_hidp,
+        hh_number_of_cars,
+        hh_cars_category,
+        tenure_condensed,
+        household_income,
+        oecd_equivilance_scale,
+        household_size
+        ), by = "h_hidp")
+```
+
+Adjust hosuehold income to 2019 prices:
+
+```{r}
+usd_microdata <- usd_microdata %>%
+        mutate(household_income = household_income * (dec_2019_index / index_base_2015), #rebase
+               household_income = round(household_income, 0), #round
+              oecd_eq_hh_income = round(household_income / oecd_equivilance_scale, 0))
+```
+
+We've got 266 respondents who don't appear to be linked with household. We can mark those on the main dataset, just so we're aware of where they've come from:
+
+```{r prove lack of link on household variables for certain cases}
+no_hh_match_vec <- anti_join(ind_subset, hh_subset, by = "h_hidp") %>%
+                   select(pidp) %>%
+  mutate(pidp = as.numeric(pidp)) %>%
+                    as_tibble() %>%
+                       unname()
+
+names(no_hh_match_vec) <- "pidp"
+
+no_hh_match_vec <- no_hh_match_vec %>%
+  pull()
+
+usd_microdata <- usd_microdata %>%
+  mutate(
+    missing_hh_match = case_when(
+      pidp %in% no_hh_match_vec ~ as.character(TRUE),
+                           TRUE ~ as.character(FALSE)))
+
+usd_microdata %>%
+  filter(missing_hh_match == "TRUE")
+```
+
+Summarise the NAs (advice taken from here: https://sebastiansauer.github.io/sum-isna/):
+
+```{r count NAs}
+#by variable ...
+usd_microdata %>%
+  select(everything()) %>%  # replace to your needs
+  summarise_all(funs(sum(is.na(.)))) %>%
+  gather(variable_name, total_nas)
+
+#by case ...
+count_na <- function(x) sum(is.na(x))
+
+usd_microdata <- usd_microdata %>%        #add a count to each case of the number of NAs it includes
+  mutate(
+    case_nas = apply(., 1, count_na))
+
+usd_microdata %>%
+  group_by(case_nas) %>%
+  tally()
+```
+
+Count nas at different stages:
+
+```{r}
+usd_microdata %>%
+  mutate(reason_for_exclusion = case_when(
+    missing_hh_match == "TRUE" ~ "1. No household match",
+    is.na(method_of_travel_to_work) ~ "2. Non response to a transport question",
+    is.na(distance_to_work_km) ~ "2. Non response to a transport question",
+    case_nas >= 1 ~ "3. Other non-response",
+    TRUE ~ "Included in final data"
+  )) %>%
+  group_by(reason_for_exclusion) %>%
+  tally()
+```
+
+Filter, count and export:
+
+```{r filter, count and export}
+usd_microdata %>%
+  filter(case_nas == 0) %>%
+  select(-missing_hh_match, -case_nas) %>%
+  write_csv("processed_data/usd_microdata/usd_microdata_processed_13_08_20b.csv")
+
+map(usd_microdata %>% names() %>% set_names(),
+          ~ usd_microdata %>%
+            group_by_at(.x) %>%
+            summarise(Count = n()))
+```
+
+
+Additional references and notes:
+
+- Helpful collection of articles on dealing with survey data: https://www.r-bloggers.com/working-with-spss-labels-in-r/
+- Good instructions on summarising datasets: https://datacarpentry.org/R-genomics/04-dplyr.html
