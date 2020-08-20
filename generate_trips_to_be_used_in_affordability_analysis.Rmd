@@ -1,0 +1,226 @@
+---
+title: "Generate trips to be used in affordability analysis"
+output: html_notebook
+---
+
+```{r, setup}
+library(tidyverse)
+library(measurements)
+library(tmap)
+library(sf)
+```
+
+Objective:
+
+- Create a list of trips
+
+From each case study station, we want a trip to:
+
+- Nearest of Manchester, Sheffield or Leeds (nearest hub)
+- Nearest of Manchester, Sheffield or Leeds that is more than 14.64 km away (commute to nearest hub)
+- Nearest major city (nearest city)
+- Nearest major city that is more than 14.64 km away (commute to nearest city)
+- London trip (generate one to each main north London terminal - decision between these will be based on fares rather than distance)
+
+Method:
+
+Start with the case study stations:
+
+```{r}
+case_study_stations <- st_read("J:/mydocuments/dissertation/processed_spatial_files/case_study_stations.shp")
+```
+
+We want a table that looks something like this ...
+
+```{r}
+trip_types <- c("nearest_hub", "commute_to_nearest_hub", "commute_to_nearest_city", "london_trip")
+
+expand_grid(case_study_stations %>% st_drop_geometry(), trip_types)
+
+```
+
+Towns and cities along the case study lines are:
+
+```{r}
+#from https://geoportal.statistics.gov.uk/datasets/major-towns-and-cities-december-2015-boundaries
+major_towns_and_cities <- st_read("J:/mydocuments/dissertation/census/major_towns_and_cities/Major_Towns_and_Cities__December_2015__Boundaries.shp")
+```
+
+The following code links stations within the case study area with those towns and cities:
+
+```{r}
+#filters for all stations within the boundary of one of the major towns or cities
+stations_within_major_ts <- st_join(case_study_stations, major_towns_and_cities, .predicate = st_within, left = TRUE)
+
+#due to multiple matches, this then finds the named station within each of the areas (presumed to be the central one)
+
+towns_and_cities <- stations_within_major_ts %>%
+  mutate(
+    major_city_central_station = case_when(
+      str_detect(StatnNm, tcity15nm) ~ "Yes",
+                                TRUE ~ "No")) %>%
+  filter(major_city_central_station == "Yes")
+
+#map the results. one station is allocated to each of the major towns or cities along the routes
+tmap_mode("view")
+tm_shape(major_towns_and_cities, bbox = case_study_stations) +
+  tm_polygons(col = "tcity15nm") +
+tm_shape(case_study_stations) +
+  tm_symbols() +
+tm_shape(towns_and_cities) +
+  tm_symbols(col = "green")
+```
+
+Of those, the hub cities are:
+
+```{r}
+hubs <- towns_and_cities %>% filter(CrsCode %in% c("MAN", "SHF", "LDS"))
+```
+
+Tidy and export:
+
+```{r}
+stations_within_major_ts <- stations_within_major_ts %>%
+  select(CrsCode, StatnNm, tcity15cd, tcity15nm, geometry)
+
+#stations_within_major_ts %>%
+#  st_write("J:/mydocuments/dissertation/processed_spatial_files/case_study_major_city_stations.shp")
+```
+
+#### Calculate distance by rail from stations to nearest major towns and cities
+These two files, alongside the rail network shapefile, were used as inputs for an ArcGIS Pro 'nearest facility' network analysis. The distance along the network from each station to each major city station was calculated. The routes were then exported as a shapefile and processed to match each station with a trip of greater than 14.64km.
+
+```{r}
+#import
+distance_from_stations_to_cities <- st_read("J:/mydocuments/dissertation/processed_spatial_files/rail_trips_to_nearest_town_or_city.shp")
+
+#tidy
+distance_from_stations_to_cities <- distance_from_stations_to_cities %>%
+  select(Name) %>%
+  separate(Name, into = c("origin", "destination")) %>%
+  mutate(distance_km = (as.numeric(st_length(geometry))/1000),
+         trip_id = paste0(origin, "_", destination)) %>%
+  filter(origin != destination)
+```
+
+Nearest hub:
+
+```{r}
+nearest_hub <- distance_from_stations_to_cities %>%
+  st_drop_geometry() %>%
+  filter(destination %in% hubs$CrsCode) %>%
+  arrange(distance_km) %>%
+  distinct(origin, .keep_all = TRUE) %>%
+  left_join(distance_from_stations_to_cities %>% select(trip_id), by = "trip_id") %>% #get the geometry back
+  st_as_sf() %>%
+  mutate(trip_type = "nearest_hub")
+
+nearest_hub
+```
+
+Commute to nearest hub:
+
+```{r}
+commute_to_nearest_hub <- distance_from_stations_to_cities %>%
+  st_drop_geometry() %>%
+  filter(destination %in% hubs$CrsCode,
+         distance_km >= 14.64) %>%
+    arrange(distance_km) %>%
+  distinct(origin, .keep_all = TRUE) %>%
+  left_join(distance_from_stations_to_cities %>% select(trip_id), by = "trip_id") %>%
+  st_as_sf() %>%
+  mutate(trip_type = "commute_to_nearest_hub")
+```
+
+Nearest town or city
+
+```{r}
+nearest_town_or_city <- distance_from_stations_to_cities %>%
+  st_drop_geometry() %>%
+  arrange(distance_km) %>%
+  distinct(origin, .keep_all = TRUE) %>%
+  left_join(distance_from_stations_to_cities %>% select(trip_id), by = "trip_id") %>%
+  st_as_sf() %>%
+  mutate(trip_type = "nearest_town_or_city")
+```
+
+Commute to nearest town or city:
+
+```{r}
+commute_to_nearest_town_or_city <- distance_from_stations_to_cities %>%
+  st_drop_geometry() %>%
+  filter(distance_km >= 14.64) %>%
+    arrange(distance_km) %>%
+  distinct(origin, .keep_all = TRUE) %>%
+  left_join(distance_from_stations_to_cities %>% select(trip_id), by = "trip_id") %>%
+  st_as_sf() %>%
+  mutate(trip_type = "commute_to_nearest_town_or_city")
+```
+
+Finally, we need our London trips. We need to get a fare for each of St Pancras, Kings Cross or Euston and then choose between these based on the fares available. So, at this stage, we'll get a line and distance to each. Calculating network distance was not feasible using network analysis, we we'll draw a line using ST, and then calculate the distance of that line.
+
+
+
+```{r}
+#get points of London stations
+setwd("J:/mydocuments/dissertation")
+naptan <- read_csv("naptan/RailReferences.csv")
+
+#filter list
+london_stations <- naptan %>%
+  filter(CrsCode %in% c("STP", "KGX", "EUS")) %>%
+  distinct(CrsCode, .keep_all = TRUE) %>%
+  select(CrsCode, Northing, Easting) %>%
+  st_as_sf(coords = c("Easting", "Northing"), crs = 27700)
+
+case_study_and_london_stations <- london_stations %>%
+  bind_rows(case_study_stations %>% select(CrsCode, geometry))
+
+#get a table that lists all the combinations
+london_trips <- expand_grid(case_study_stations %>% st_drop_geometry() %>% select(origin = CrsCode), 
+            london_stations %>% st_drop_geometry() %>% select(destination = CrsCode)) %>%
+  mutate(trip_id = paste0(origin, "_", destination))
+
+#pivot_longer and join the spatial data to each row
+london_trip_lines <- london_trips %>%
+  pivot_longer(c(origin, destination), names_to = "orig_or_dest", values_to = "CrsCode") %>%
+  left_join(case_study_and_london_stations, by = "CrsCode") %>%
+  st_as_sf() %>%
+  select(trip_id)
+
+london_trip_lines <- london_trip_lines %>% 
+  group_by(trip_id) %>%
+  summarise(do_union=FALSE) %>%
+  st_cast("LINESTRING")
+
+london_trip_lines <- london_trip_lines %>%
+  mutate(
+    distance_km = (as.numeric(st_length(geometry))/1000))
+
+london_trips <- london_trips %>%
+  left_join(london_trip_lines, by = "trip_id") %>%
+  mutate(trip_type = "london_trip") %>%
+  select(origin, destination, distance_km, trip_id, geometry, trip_type)
+```
+
+Now bind all of these together and export, so that they can be used within the fares analysis:
+
+```{r}
+all_trips <- bind_rows(
+  nearest_hub,
+  commute_to_nearest_hub,
+  nearest_town_or_city,
+  commute_to_nearest_town_or_city,
+  london_trips
+)
+
+tm_shape(all_trips) +
+  tm_lines()
+
+st_write(all_trips, "J:/mydocuments/dissertation/processed_spatial_files/all_rail_trips_20_08_20.shp")
+```
+
+Notes:
+
+### Allocating a commuting trip from each station
+The trip to the nearest of either Manchester, Sheffield or Leeds was initially considered. However, analysis of this trip would have assessed the affordability of very different types of rail use across - short urban trips vs. commuting. Assessing the nearest affordability of the fare to the nearest of the cities that was greater than 20km away. However, many of these trips were outside of the 20:80 percentile range of journeys reported in the national travel survey. Therefore, an analysis would've been based on the affordability of supercommuting for some (particularlr near inner urban residents of the three cities), and more typical commuting for others. Instead, a database of 'major cities' was found, and the affordability of a fare to the nearest of those cities from each station was calculated.
