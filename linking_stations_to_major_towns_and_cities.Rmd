@@ -1,0 +1,64 @@
+---
+title: "Find stations in major towns and cities"
+output: html_notebook
+---
+
+```{r, setup}
+library(tidyverse)
+library(sf)
+```
+
+### Allocating a commuting trip from each station
+The trip to the nearest of either Manchester, Sheffield or Leeds was initially considered. However, analysis of this trip would have assessed the affordability of very different types of rail use across - short urban trips vs. commuting. Assessing the nearest affordability of the fare to the nearest of the cities that was greater than 20km away. However, many of these trips were outside of the 20:80 percentile range of journeys reported in the national travel survey. Therefore, an analysis would've been based on the affordability of supercommuting for some (particularlr near inner urban residents of the three cities), and more typical commuting for others. Instead, a database of 'major cities' was found, and the affordability of a fare to the nearest of those cities from each station was calculated.
+
+Get shapefiles:
+
+```{r}
+#from https://geoportal.statistics.gov.uk/datasets/major-towns-and-cities-december-2015-boundaries
+major_towns_and_cities <- st_read("J:/mydocuments/dissertation/census/major_towns_and_cities/Major_Towns_and_Cities__December_2015__Boundaries.shp")
+
+case_study_stations <- st_read("J:/mydocuments/dissertation/processed_spatial_files/case_study_stations.shp")
+```
+
+Plot stations and major towns and cities:
+
+```{r}
+tmap_mode("view")
+tm_shape(major_towns_and_cities, bbox = case_study_stations) +
+  tm_polygons(col = "tcity15nm") +
+tm_shape(case_study_stations) +
+  tm_symbols()
+```
+
+```{r}
+#filters for all stations within the boundary of one of the major towns or cities
+case_study_stations %>%
+  filter(st_within(., major_towns_and_cities, sparse = FALSE)[1,])
+
+stations_within_major_ts <- st_join(case_study_stations, major_towns_and_cities, .predicate = st_within, left = TRUE)
+
+#due to multiple matches, this then finds the named station within each of the areas (presumed to be the central one)
+
+stations_within_major_ts <- stations_within_major_ts %>%
+  mutate(
+    major_city_central_station = case_when(
+      str_detect(StatnNm, tcity15nm) ~ "Yes",
+                                TRUE ~ "No")) %>%
+  filter(major_city_central_station == "Yes")
+
+#map the results. one station is allocated to each of the major towns or cities along the routes
+tmap_mode("view")
+tm_shape(major_towns_and_cities, bbox = case_study_stations) +
+  tm_polygons(col = "tcity15nm") +
+tm_shape(case_study_stations) +
+  tm_symbols() +
+tm_shape(stations_within_major_ts) +
+  tm_symbols(col = "green")
+```
+
+Export:
+
+```{r}
+
+```
+
