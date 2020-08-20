@@ -1,0 +1,615 @@
+---
+title: "Get fares data revised"
+output: html_notebook
+---
+
+```{r}
+library(httr)
+library(jsonlite)
+library(stringr)
+library(tidyverse)
+library(sf)
+library(tmap)
+library(stringi)
+library(stplanr)
+library(lwgeom)
+knitr::opts_knit$set(root.dir = "J:/mydocuments/dissertation")
+```
+
+Get naptan data:
+
+```{r}
+setwd("J:/mydocuments/dissertation")
+naptan <- read_csv("naptan/RailReferences.csv")
+```
+
+Get file from previous stages of analysis:
+
+```{r}
+setwd("J:/mydocuments/dissertation/")
+linked_stations <- read_csv("processed_data/msoas_with_linked_stations.csv")
+setwd("J:/mydocuments/dissertation/processed_spatial_files")
+case_study_stations <- st_read("case_study_stations.shp")
+all_trips <- st_read("all_rail_trips_20_08_20.shp")
+
+#tidy the all trips headers
+all_trips <- all_trips %>%
+  rename(destination = "destntn",
+         distance_km = "dstnc_k",
+         trip_type = "trp_typ")
+```
+
+The fares loop is adapted from a script provided by Young (2020, personal correspondence). Guidance on calculating monthly season ticket prices from 7 day seasons was taken from [railforums.co.uk](https://www.railforums.co.uk/threads/railuk-fares-ticketing-guide-section-5-multi-journey-tickets.67598/). It will also use the following function taken from [Stack Overflow](https://stackoverflow.com/questions/10256503/function-for-median-similar-to-which-max-and-which-min-extracting-median-r)
+
+```{r}
+#create which median function ()
+whichmedian <- function(x) which.min(abs(x - median(x)))
+```
+
+### London fares:
+Peak and off-peak fares from the following operators will be excluded, as they offer an infrequent service on the route and services on which the fares could be used were not found.
+
+```{r}
+excluded_operators <- c("LBR", "GCR", "HUL")
+```
+
+Loop:
+
+```{r}
+#Create subset of just the London trips
+london_fares <- all_trips %>%
+  filter(trip_type == "london_trip") %>%
+  select(trip_id, origin, destination) %>%
+  st_drop_geometry() %>%
+  distinct(trip_id, .keep_all = TRUE)
+
+#set total number of iterations
+total <- nrow(london_fares)
+
+#set up errors data frame
+errors <- data.frame(
+  id = integer(),
+  correctOrig = character(),
+  correctDest = character(),
+  correctRlc = character(),
+  noFares = character()
+)
+
+for (i in 1:total) {
+
+#set values
+  originCrs <- london_fares$origin[i] # is the alternative
+  destCrs <- london_fares$destination[i]
+  
+    # set up the feed URL``
+  feedUrl <-
+    paste("http://api.brfares.com/queryextra?orig=",
+          originCrs,
+          "&dest=",
+          destCrs,
+          sep =
+            "")
+
+  # This makes the API call
+  req <- GET(feedUrl, config(accept_encoding = "gzip"))  
+  
+  text <- content(req, as = "text")
+  
+  # Convert from JSON to list of R objects
+  asRlist <- fromJSON(text)
+
+  # Check that the api call response is valid (using the $ signs goes into the levels of the list)
+  if (asRlist$correct$orig == TRUE &&
+      asRlist$correct$dest == TRUE &&
+      asRlist$correct$rlc == TRUE &&
+      !is.null(asRlist$fares$adult$fare)) {  
+ 
+  # Define the values of interest (this extracts values from the list)
+        fareCategory <- asRlist$fares$category$desc
+        routeCode <- asRlist$fares$route$code
+        routeName <- asRlist$fares$route$name
+        ticketCode <- asRlist$fares$ticket$code
+        ticketName <- asRlist$fares$ticket$name
+        restrictionCode <- asRlist$fares$restriction$code
+        adultFare <- asRlist$fares$adult$fare
+        childFare <- asRlist$fares$child$fare
+        fareSetter <- asRlist$fares$fare_setter$code
+        originName <- asRlist$orig$longname
+        destinationName <- asRlist$dest$longname
+      
+  # Create ticket dataframe
+        tickets_tibble <-
+          tibble(
+            fareCategory,
+            routeCode,
+            routeName,
+            ticketCode,
+            ticketName,
+            restrictionCode,
+            "adultFare" = adultFare / 100,
+            "childFare" = childFare / 100,
+            fareSetter,
+          )
+    
+    # Subset off-peak returns
+    off_peak_tickets <-
+      tickets_tibble[tickets_tibble$ticketCode == "CDR" |
+                     tickets_tibble$ticketCode == "SVR" |
+                     tickets_tibble$ticketCode == "BFR" |
+                     tickets_tibble$ticketCode == "G2R" |
+                     tickets_tibble$ticketCode == "SMG", ] %>%
+      filter(!fareSetter %in% excluded_operators)
+    
+    off_peak_singles <- 
+      tickets_tibble[tickets_tibble$ticketCode == "SSS" | #super-offpeak single
+                     tickets_tibble$ticketCode == "SOC" | #super-offpeak day single
+                     tickets_tibble$ticketCode == "CDS", ] %>%
+      filter(!fareSetter %in% excluded_operators)
+    
+    ## Subset anytime returns
+    anytime_tickets <-
+      tickets_tibble[tickets_tibble$ticketCode == "SDR" |
+                     tickets_tibble$ticketCode == "SHR" |
+                     tickets_tibble$ticketCode == "SOR" |
+                     tickets_tibble$ticketCode == "GOR" |
+                     tickets_tibble$ticketCode == "GTR", ] %>%
+      filter(!fareSetter %in% excluded_operators)
+    
+    anytime_singles <- 
+      tickets_tibble[tickets_tibble$ticketCode == "SDS" |
+                    tickets_tibble$ticketCode ==  "SOS", ] %>%
+      filter(!fareSetter %in% excluded_operators)
+    
+    ## Subset second class seasons
+    season_tickets <-
+      tickets_tibble[tickets_tibble$ticketCode == "PSS" |
+                     tickets_tibble$ticketCode == "7DS" | 
+                     tickets_tibble$ticketCode == "GF7", ] %>%
+      filter(!fareSetter %in% excluded_operators)
+
+    ## Subset second class advance
+    advance_tickets <-
+      tickets_tibble[tickets_tibble$ticketName == "ADVANCE", ]
+    
+  # Extract fare - need to take minimum as alternative routes may be possible
+    
+    ## Get off-peak fare - use CDR if available, otherwise ...
+    if (nrow(off_peak_tickets) > 0) {
+          if ("CDR" %in% off_peak_tickets$ticketCode) {
+            idx <- which.min(off_peak_tickets$adultFare[off_peak_tickets$ticketCode == "CDR"]) #this gets the ID of the cheapest ticket
+            offpeakReturn <- off_peak_tickets$adultFare[idx] # which is then extracted (fare)
+            offpeakChReturn <- off_peak_tickets$childFare[idx]
+            offpeakRestriction <- off_peak_tickets$restrictionCode[idx] #restriction code
+            offpeakName <- off_peak_tickets$ticketName[idx]
+          } else {
+            idx <- which.min(off_peak_tickets$adultFare) #and again
+            offpeakReturn <- off_peak_tickets$adultFare[idx]
+            offpeakChReturn <- off_peak_tickets$childFare[idx]
+            offpeakRestriction <- off_peak_tickets$restrictionCode[idx]
+            offpeakName <- off_peak_tickets$ticketName[idx]
+                 }
+                                     } else 
+          if(nrow(off_peak_singles) > 0) {
+            idx <- which.min(off_peak_singles$adultFare)
+            offpeakReturn <- off_peak_singles$adultFare[idx] * 2
+            offpeakChReturn <- off_peak_singles$childFare[idx]  * 2           
+            offpeakRestriction <- off_peak_singles$restrictionCode[idx]
+            offpeakName <- paste0("Computed from ", off_peak_singles$ticketName[idx])
+                                         } else {
+            offpeakReturn <- as.numeric("NULL")
+            offpeakChReturn <- as.numeric("NULL")
+            offpeakRestriction <- as.character("NULL")
+            offpeakName <- as.character("NULL")
+                                                }
+    
+    # get anytime fare - use SDR if available, otherwise ...
+      if (nrow(anytime_tickets) > 0) {
+        if ("SDR" %in% anytime_tickets$ticketCode) {
+          idx <-
+            which.min(anytime_tickets$adultFare[anytime_tickets$ticketCode == "SDR"])
+          anytimeReturn <- anytime_tickets$adultFare[idx]
+          anytimeChReturn <- anytime_tickets$childFare[idx]
+          anytimeRestriction <- anytime_tickets$restrictionCode[idx]
+          anytimeName <- anytime_tickets$ticketName[idx]
+                                                   } else {
+          idx <- which.min(anytime_tickets$adultFare)
+          anytimeReturn <- anytime_tickets$adultFare[idx]
+          anytimeChReturn <- anytime_tickets$childFare[idx]
+          anytimeRestriction <- anytime_tickets$restrictionCode[idx]
+          anytimeName <- anytime_tickets$ticketName[idx]
+                                                          }
+                                      } else 
+        if(nrow(anytime_singles) > 0) {
+            idx <- which.min(anytime_singles$adultFare)
+            anytimeReturn <- anytime_singles$adultFare[idx] * 2
+            anytimeChReturn <- anytime_singles$childFare[idx] * 2            
+            anytimeRestriction <- anytime_singles$restrictionCode[idx]
+            anytimeName <- paste0("Computed from ", anytime_singles$ticketName[idx])
+                                      } else {
+          anytimeReturn <- as.numeric("NULL")
+          anytimeChReturn <- as.numeric("NULL")
+          anytimeRestriction <- as.character("NULL")
+          anytimeName <- as.character("NULL")
+                                  }
+    
+    # get monthly season fare - use PSS (monthly) if available, otherwise ...
+      if (nrow(season_tickets) > 0) {
+        if ("PSS" %in% season_tickets$ticketCode) {
+          idx <- which.min(season_tickets$adultFare[season_tickets$ticketCode == "PSS"])
+          monthlySeason <- round(season_tickets$adultFare[idx] * 3.84, 1) #round to nearest 10p, as stated in guidance
+          monthlyChSeason <- round(season_tickets$childFare[idx] * 3.84, 1) #round to nearest 10p, as stated in guidance
+          monthlyRestriction <- season_tickets$restrictionCode[idx]
+          monthlyName <- season_tickets$ticketName[idx]
+                                                  } else 
+        if ("7DS" %in% season_tickets$ticketCode) {
+          idx <- which.min(season_tickets$adultFare[season_tickets$ticketCode == "7DS"])
+          monthlySeason <- round(season_tickets$adultFare[idx] * 3.84, 1)
+          monthlyChSeason <- round(season_tickets$childFare[idx] * 3.84, 1) #round to nearest 10p, as stated in guidance
+          monthlyRestriction <- season_tickets$restrictionCode[idx]
+          monthlyName <- season_tickets$ticketName[idx]
+                                                  } else
+        if ("GF7" %in% season_tickets$ticketCode) {
+          idx <- which.min(season_tickets$adultFare[season_tickets$ticketCode == "GF7"])
+          monthlySeason <- round(season_tickets$adultFare[idx] * 3.84, 1)
+          monthlyChSeason <- round(season_tickets$childFare[idx] * 3.84, 1) #round to nearest 10p, as stated in guidance
+          monthlyRestriction <- season_tickets$restrictionCode[idx]
+          monthlyName <- season_tickets$ticketName[idx]
+                                                  }} else {
+          monthlySeason <- as.numeric("NULL")
+          monthlyChSeason <- as.numeric("NULL")
+          monthlyRestriction <- as.character("NULL")
+          monthlyName <- as.character("NULL")
+                                  }
+
+    # get advance tickets
+      if (nrow(advance_tickets) > 0) {
+          idx <- whichmedian(advance_tickets$adultFare)
+          advanceReturn <- advance_tickets$adultFare[idx] * 2
+          advanceChReturn <- advance_tickets$childFare[idx] * 2
+          advanceRestriction <- advance_tickets$restrictionCode[idx]
+          advanceName <- advance_tickets$ticketName[idx]
+      } else {
+          advanceReturn <- as.numeric("NULL")
+          advanceChReturn <- as.numeric("NULL")          
+          advanceRestriction <- as.character("NULL")
+          advanceName <- as.character("NULL")                          
+                                 }
+    
+    london_fares[i, "origin_name"] <- originName
+    london_fares[i, "destination_name"] <- destinationName
+    london_fares[i, "offpeak_fare"] <- offpeakReturn
+    london_fares[i, "offpeak_ch_fare"] <- offpeakChReturn
+    london_fares[i, "offpeak_restriction"] <- str_trim(offpeakRestriction)
+    london_fares[i, "offpeak_name"] <- offpeakName
+    london_fares[i, "anytime_fare"] <- anytimeReturn
+    london_fares[i, "anytime_ch_fare"] <- anytimeChReturn    
+    london_fares[i, "anytime_restriction"] <- str_trim(anytimeRestriction)
+    london_fares[i, "anytime_name"] <- anytimeName
+    london_fares[i, "season_fare"] <- monthlySeason
+    london_fares[i, "season_ch_fare"] <- monthlyChSeason    
+    london_fares[i, "season_restriction"] <- str_trim(monthlyRestriction)
+    london_fares[i, "season_name"] <- monthlyName
+    london_fares[i, "advance_fare"] <- advanceReturn
+    london_fares[i, "advance_ch_fare"] <- advanceChReturn    
+    london_fares[i, "advance_restriction"] <- str_trim(advanceRestriction)
+    london_fares[i, "advance_name"] <- advanceName
+
+  } else {
+    # there is a problem with the api call response - record errors in errors dataframe for later review
+    newRow <-
+      data.frame(
+        id = i,
+        correctOrig = asRlist$correct$orig,
+        correctDest = asRlist$correct$dest,
+        correctRlc = asRlist$correct$rlc,
+        nofares = paste(is.null(asRlist$fares$adult$fare))
+      )
+    errors <- rbind(errors, newRow)
+  }}
+```
+
+### Non-London fares:
+
+```{r}
+#subset non-London trips
+case_study_area_fares <- all_trips %>%
+  filter(trip_type != "london_trip") %>%
+  select(trip_id, origin, destination) %>%
+  st_drop_geometry() %>%
+  distinct(trip_id, .keep_all = TRUE)
+
+#set total number of iterations
+total <- nrow(case_study_area_fares)
+
+#set up errors data frame
+errors <- data.frame(
+  id = integer(),
+  correctOrig = character(),
+  correctDest = character(),
+  correctRlc = character(),
+  noFares = character()
+)
+
+for (i in 1:total) {
+
+#set values
+  originCrs <- case_study_area_fares$origin[i] # is the alternative
+  destCrs <- case_study_area_fares$destination[i]
+  
+    # set up the feed URL``
+  feedUrl <-
+    paste("http://api.brfares.com/queryextra?orig=",
+          originCrs,
+          "&dest=",
+          destCrs,
+          sep =
+            "")
+
+  # This makes the API call
+  req <- GET(feedUrl, config(accept_encoding = "gzip"))  
+  
+  text <- content(req, as = "text")
+  
+  # Convert from JSON to list of R objects
+  asRlist <- fromJSON(text)
+
+  # Check that the api call response is valid (using the $ signs goes into the levels of the list)
+  if (asRlist$correct$orig == TRUE &&
+      asRlist$correct$dest == TRUE &&
+      asRlist$correct$rlc == TRUE &&
+      !is.null(asRlist$fares$adult$fare)) {  
+ 
+  # Define the values of interest (this extracts values from the list)
+        fareCategory <- asRlist$fares$category$desc
+        routeCode <- asRlist$fares$route$code
+        routeName <- asRlist$fares$route$name
+        ticketCode <- asRlist$fares$ticket$code
+        ticketName <- asRlist$fares$ticket$name
+        restrictionCode <- asRlist$fares$restriction$code
+        adultFare <- asRlist$fares$adult$fare
+        childFare <- asRlist$fares$child$fare
+        fareSetter <- asRlist$fares$fare_setter$code
+        originName <- asRlist$orig$longname
+        destinationName <- asRlist$dest$longname
+      
+  # Create ticket dataframe
+        tickets_tibble <-
+          tibble(
+            fareCategory,
+            routeCode,
+            routeName,
+            ticketCode,
+            ticketName,
+            restrictionCode,
+            "adultFare" = adultFare / 100,
+            "childFare" = childFare / 100,
+            fareSetter
+          )
+    
+    # Subset off-peak returns
+    off_peak_tickets <-
+      tickets_tibble[tickets_tibble$ticketCode == "CDR" |
+                     tickets_tibble$ticketCode == "SVR" |
+                     tickets_tibble$ticketCode == "BFR" |
+                     tickets_tibble$ticketCode == "G2R" |
+                     tickets_tibble$ticketCode == "SMG", ]
+    
+    off_peak_singles <- 
+      tickets_tibble[tickets_tibble$ticketCode == "SSS" | #super-offpeak single
+                     tickets_tibble$ticketCode == "SOC" | #super-offpeak day single
+                     tickets_tibble$ticketCode == "CDS", ]
+    
+    ## Subset anytime returns
+    anytime_tickets <-
+      tickets_tibble[tickets_tibble$ticketCode == "SDR" |
+                     tickets_tibble$ticketCode == "SHR" |
+                     tickets_tibble$ticketCode == "SOR" |
+                     tickets_tibble$ticketCode == "GOR" |
+                     tickets_tibble$ticketCode == "GTR", ]
+    
+    anytime_singles <- 
+      tickets_tibble[tickets_tibble$ticketCode == "SDS" |
+                    tickets_tibble$ticketCode ==  "SOS", ]
+    
+    ## Subset second class seasons
+    season_tickets <-
+      tickets_tibble[tickets_tibble$ticketCode == "PSS" |
+                     tickets_tibble$ticketCode == "7DS" | 
+                     tickets_tibble$ticketCode == "GF7", ]
+    
+    ## Subset second class advance
+    advance_tickets <-
+      tickets_tibble[tickets_tibble$ticketName == "ADVANCE", ]
+    
+  # Extract fare - need to take minimum as alternative routes may be possible
+    
+    ## Get off-peak fare - use CDR if available, otherwise ...
+    if (nrow(off_peak_tickets) > 0) {
+          if ("CDR" %in% off_peak_tickets$ticketCode) {
+            idx <- which.min(off_peak_tickets$adultFare[off_peak_tickets$ticketCode == "CDR"]) #this gets the ID of the cheapest ticket
+            offpeakReturn <- off_peak_tickets$adultFare[idx] # which is then extracted (fare)
+            offpeakChReturn <- off_peak_tickets$childFare[idx]
+            offpeakRestriction <- off_peak_tickets$restrictionCode[idx] #restriction code
+            offpeakName <- off_peak_tickets$ticketName[idx]
+          } else {
+            idx <- which.min(off_peak_tickets$adultFare) #and again
+            offpeakReturn <- off_peak_tickets$adultFare[idx]
+            offpeakChReturn <- off_peak_tickets$childFare[idx]
+            offpeakRestriction <- off_peak_tickets$restrictionCode[idx]
+            offpeakName <- off_peak_tickets$ticketName[idx]
+                 }
+                                     } else 
+          if(nrow(off_peak_singles) > 0) {
+            idx <- which.min(off_peak_singles$adultFare)
+            offpeakReturn <- off_peak_singles$adultFare[idx] * 2
+            offpeakChReturn <- off_peak_singles$childFare[idx]  * 2           
+            offpeakRestriction <- off_peak_singles$restrictionCode[idx]
+            offpeakName <- paste0("Computed from ", off_peak_singles$ticketName[idx])
+                                         } else {
+            offpeakReturn <- as.numeric("NULL")
+            offpeakChReturn <- as.numeric("NULL")
+            offpeakRestriction <- as.character("NULL")
+            offpeakName <- as.character("NULL")
+                                                }
+    
+    # get anytime fare - use SDR if available, otherwise ...
+      if (nrow(anytime_tickets) > 0) {
+        if ("SDR" %in% anytime_tickets$ticketCode) {
+          idx <-
+            which.min(anytime_tickets$adultFare[anytime_tickets$ticketCode == "SDR"])
+          anytimeReturn <- anytime_tickets$adultFare[idx]
+          anytimeChReturn <- anytime_tickets$childFare[idx]
+          anytimeRestriction <- anytime_tickets$restrictionCode[idx]
+          anytimeName <- anytime_tickets$ticketName[idx]
+                                                   } else {
+          idx <- which.min(anytime_tickets$adultFare)
+          anytimeReturn <- anytime_tickets$adultFare[idx]
+          anytimeChReturn <- anytime_tickets$childFare[idx]
+          anytimeRestriction <- anytime_tickets$restrictionCode[idx]
+          anytimeName <- anytime_tickets$ticketName[idx]
+                                                          }
+                                      } else 
+        if(nrow(anytime_singles) > 0) {
+            idx <- which.min(anytime_singles$adultFare)
+            anytimeReturn <- anytime_singles$adultFare[idx] * 2
+            anytimeChReturn <- anytime_singles$childFare[idx] * 2            
+            anytimeRestriction <- anytime_singles$restrictionCode[idx]
+            anytimeName <- paste0("Computed from ", anytime_singles$ticketName[idx])
+                                      } else {
+          anytimeReturn <- as.numeric("NULL")
+          anytimeChReturn <- as.numeric("NULL")
+          anytimeRestriction <- as.character("NULL")
+          anytimeName <- as.character("NULL")
+                                  }
+    
+    # get monthly season fare - use PSS (monthly) if available, otherwise ...
+      if (nrow(season_tickets) > 0) {
+        if ("PSS" %in% season_tickets$ticketCode) {
+          idx <- which.min(season_tickets$adultFare[season_tickets$ticketCode == "PSS"])
+          monthlySeason <- round(season_tickets$adultFare[idx] * 3.84, 1) #round to nearest 10p, as stated in guidance
+          monthlyChSeason <- round(season_tickets$childFare[idx] * 3.84, 1) 
+          monthlyRestriction <- season_tickets$restrictionCode[idx]
+          monthlyName <- season_tickets$ticketName[idx]
+                                                  } else 
+        if ("7DS" %in% season_tickets$ticketCode) {
+          idx <- which.min(season_tickets$adultFare[season_tickets$ticketCode == "7DS"])
+          monthlySeason <- round(season_tickets$adultFare[idx] * 3.84, 1)
+          monthlyChSeason <- round(season_tickets$childFare[idx] * 3.84, 1) 
+          monthlyRestriction <- season_tickets$restrictionCode[idx]
+          monthlyName <- season_tickets$ticketName[idx]
+                                                  } else
+        if ("GF7" %in% season_tickets$ticketCode) {
+          idx <- which.min(season_tickets$adultFare[season_tickets$ticketCode == "GF7"])
+          monthlySeason <- round(season_tickets$adultFare[idx] * 3.84, 1)
+          monthlyChSeason <- round(season_tickets$childFare[idx] * 3.84, 1)
+          monthlyRestriction <- season_tickets$restrictionCode[idx]
+          monthlyName <- season_tickets$ticketName[idx]
+                                                  }} else {
+          monthlySeason <- as.numeric("NULL")
+          monthlyChSeason <- as.numeric("NULL")
+          monthlyRestriction <- as.character("NULL")
+          monthlyName <- as.character("NULL")
+                                  }
+
+    # get advance tickets
+      if (nrow(advance_tickets) > 0) {
+          idx <- whichmedian(advance_tickets$adultFare)
+          advanceReturn <- advance_tickets$adultFare[idx] * 2
+          advanceChReturn <- advance_tickets$childFare[idx] * 2
+          advanceRestriction <- advance_tickets$restrictionCode[idx]
+          advanceName <- advance_tickets$ticketName[idx]
+      } else {
+          advanceReturn <- as.numeric("NULL")
+          advanceChReturn <- as.numeric("NULL")          
+          advanceRestriction <- as.character("NULL")
+          advanceName <- as.character("NULL")                          
+                                 }
+  
+    case_study_area_fares[i, "origin_name"] <- originName
+    case_study_area_fares[i, "destination_name"] <- destinationName      
+    case_study_area_fares[i, "offpeak_fare"] <- offpeakReturn
+    case_study_area_fares[i, "offpeak_ch_fare"] <- offpeakChReturn
+    case_study_area_fares[i, "offpeak_restriction"] <- str_trim(offpeakRestriction)
+    case_study_area_fares[i, "offpeak_name"] <- offpeakName
+    case_study_area_fares[i, "anytime_fare"] <- anytimeReturn
+    case_study_area_fares[i, "anytime_ch_fare"] <- anytimeChReturn    
+    case_study_area_fares[i, "anytime_restriction"] <- str_trim(anytimeRestriction)
+    case_study_area_fares[i, "anytime_name"] <- anytimeName
+    case_study_area_fares[i, "season_fare"] <- monthlySeason
+    case_study_area_fares[i, "season_ch_fare"] <- monthlyChSeason    
+    case_study_area_fares[i, "season_restriction"] <- str_trim(monthlyRestriction)
+    case_study_area_fares[i, "season_name"] <- monthlyName
+    case_study_area_fares[i, "advance_fare"] <- advanceReturn
+    case_study_area_fares[i, "advance_ch_fare"] <- advanceChReturn    
+    case_study_area_fares[i, "advance_restriction"] <- str_trim(advanceRestriction)
+    case_study_area_fares[i, "advance_name"] <- advanceName
+
+
+  } else {
+    # there is a problem with the api call response - record errors in errors dataframe for later review
+    newRow <-
+      data.frame(
+        id = i,
+        correctOrig = asRlist$correct$orig,
+        correctDest = asRlist$correct$dest,
+        correctRlc = asRlist$correct$rlc,
+        nofares = paste(is.null(asRlist$fares$adult$fare))
+      )
+    errors <- rbind(errors, newRow)
+  }}
+```
+
+Get one London trip from the range available. Decision based on cheapest advance fare, as this is where variation occurs.
+
+```{r}
+london_fares <- london_fares %>%
+  arrange(advance_fare) %>%
+  distinct(origin, .keep_all = TRUE)
+
+head(london_fares)
+```
+
+Now check for missing values in the case study fares. Main thing to check is the season fare:
+
+```{r}
+case_study_area_fares %>%
+  filter(is.na(season_fare))
+```
+
+New Mills Central to Stockport is the only trip that's missing a season. This is likely because there's no direct train. Instead, a fare from New Mills Newtown was manually obtained from BRFares.
+
+```{r}
+nmn_spt_season_fare <- 31.30 * 3.84
+
+case_study_area_fares <- case_study_area_fares %>%
+  mutate(
+    season_fare = case_when(
+    origin == "NMC" & destination == "SPT" ~ nmn_spt_season_fare,
+                                      TRUE ~ season_fare),
+    season_ch_fare = case_when(
+    origin == "NMC" & destination == "SPT" ~ nmn_spt_season_fare/2,
+                                      TRUE ~ season_ch_fare))
+```
+
+```{r}
+all_fares <- bind_rows(london_fares, case_study_area_fares)
+
+all_trips <- all_trips %>%
+  left_join(all_fares, by = "trip_id")
+```
+
+### Write
+
+```{r}
+setwd("J:/mydocuments/dissertation/processed_data")
+write.csv(all_fares, "all_fares_20_08_20.csv")
+```
+
+#### Write up
+Fares were obtained from BR Fares (brfares.com)
+
+- http://www.brfares.com/rdg-easier-fares.pdf
+- http://www.brfares.com/williams-review.pdf
+
+### Get distance between stations
+Network analysis was conducted in ArcGIS Pro to calculate the distance for each trip. To create a dataset that could be used to create a network dataset, the railway line data obtained form Ordnance Survey was edited to join lines together, fill in gaps, and remove overlapping sections in the multilinestring shapefile. The output was then re-processed using the line intersection tool to add junctions. Destination stations were then used as 'facilities' and origins used as 'incidents' during a nearest facility analysis. The results are plotted below.
